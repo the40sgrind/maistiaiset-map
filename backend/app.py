@@ -3,6 +3,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import pandas as pd
 from datetime import datetime
+import uuid
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -10,10 +11,24 @@ from datetime import datetime
 st.set_page_config(page_title="Maistiaiset Map", layout="wide")
 
 # -------------------------------------------------
-# FIREBASE INIT
+# FIREBASE INIT (USING STREAMLIT SECRETS)
 # -------------------------------------------------
+firebase_config = st.secrets["firebase"]
+
 if not firebase_admin._apps:
-    cred = credentials.Certificate("firebase_key.json")
+    cred = credentials.Certificate({
+        "type": firebase_config["type"],
+        "project_id": firebase_config["project_id"],
+        "private_key_id": firebase_config["private_key_id"],
+        "private_key": firebase_config["private_key"],
+        "client_email": firebase_config["client_email"],
+        "client_id": firebase_config["client_id"],
+        "auth_uri": firebase_config["auth_uri"],
+        "token_uri": firebase_config["token_uri"],
+        "auth_provider_x509_cert_url": firebase_config["auth_provider_x509_cert_url"],
+        "client_x509_cert_url": firebase_config["client_x509_cert_url"],
+        "universe_domain": "googleapis.com"
+    })
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
@@ -22,33 +37,34 @@ db = firestore.client()
 # HELPER FUNCTIONS
 # -------------------------------------------------
 def format_time(dt):
-    """Format datetime into Finnish style or return raw string."""
     if hasattr(dt, "strftime"):
         return dt.strftime("%d.%m.%Y klo %H:%M")
     return str(dt)
 
-def render_event_card(event_row):
-    product_name = event_row.get("product_name", "")
-    brand_id = event_row.get("brand_id", "")
-    store_name = event_row.get("store_name", "")
-    address = event_row.get("address", "")
-    description = event_row.get("description", "")
-    start_time = format_time(event_row.get("start_time"))
-    end_time = format_time(event_row.get("end_time"))
-    approved = event_row.get("approved", False)
+def render_event_card(event):
+    """Render a dark-mode card using an HTML iframe (SAFE + GUARANTEED rendering)."""
+    product_name = event.get("product_name", "")
+    brand_id = event.get("brand_id", "")
+    store_name = event.get("store_name", "")
+    address = event.get("address", "")
+    description = event.get("description", "")
+    start_time = format_time(event.get("start_time"))
+    end_time = format_time(event.get("end_time"))
+    approved = event.get("approved", False)
 
     status_label = "Hyväksytty" if approved else "Odottaa hyväksyntää"
     status_color = "#00c853" if approved else "#ffd600"
 
-    st.html(
-        f"""
+    html = f"""
+    <html>
+    <body style="margin:0; padding:0; background-color:#0e1117;">
         <div style="
             border-radius: 12px;
             border: 1px solid #333;
             padding: 18px;
             margin-bottom: 16px;
-            background-color: #1e1e1e; /* DARK MODE background */
-            color: #f2f2f2;            /* FORCE text light */
+            background-color: #1e1e1e;
+            color: #f2f2f2;
             font-family: sans-serif;
         ">
 
@@ -58,11 +74,7 @@ def render_event_card(event_row):
                 align-items: center;
                 margin-bottom: 8px;
             ">
-                <div style="
-                    font-weight: 700;
-                    font-size: 1.2rem;
-                    color: #ffffff; /* FORCE visible title */
-                ">
+                <div style="font-weight:700; font-size:1.2rem; color:#ffffff;">
                     {product_name}
                     <span style="font-weight:400; color:#bbbbbb;">
                         {("– " + brand_id) if brand_id else ""}
@@ -70,51 +82,58 @@ def render_event_card(event_row):
                 </div>
 
                 <div style="
-                    font-size: 0.8rem;
-                    padding: 3px 10px;
-                    border-radius: 999px;
-                    background-color: {status_color}33;
-                    color: {status_color};
-                    border: 1px solid {status_color}55;
-                    font-weight: 600;
+                    font-size:0.8rem;
+                    padding:3px 10px;
+                    border-radius:999px;
+                    background-color:{status_color}33;
+                    color:{status_color};
+                    border:1px solid {status_color}55;
+                    font-weight:600;
                 ">
                     {status_label}
                 </div>
             </div>
 
-            <div style="font-size: 1rem; margin-top: 6px; color:#e0e0e0;">
+            <div style="font-size:1rem; margin-top:6px; color:#e0e0e0;">
                 {store_name} • {address}
             </div>
 
-            <div style="font-size: 0.9rem; margin-top: 6px; color:#cccccc;">
+            <div style="font-size:0.9rem; margin-top:6px; color:#cccccc;">
                 {start_time} – {end_time}
             </div>
 
-            <div style="font-size: 1rem; margin-top: 10px; color:#f2f2f2;">
+            <div style="font-size:1rem; margin-top:10px; color:#f2f2f2;">
                 {description}
             </div>
 
         </div>
-        """
-    )
+    </body>
+    </html>
+    """
 
+    # Use an iframe to bypass Streamlit's markdown escaping forever
+    iframe_id = str(uuid.uuid4()).replace("-", "")
+    iframe_html = f"""
+        <iframe id="{iframe_id}" srcdoc='{html}' 
+            style="width:100%; height:260px; border:none; overflow:hidden;">
+        </iframe>
+    """
+    st.components.v1.html(iframe_html, height=260)
 
 # -------------------------------------------------
-# FETCH EVENTS FROM FIRESTORE
+# FETCH EVENTS
 # -------------------------------------------------
 events_ref = db.collection("events")
-events = events_ref.stream()
+events_stream = events_ref.stream()
 
-event_list = []
-for event in events:
-    event_list.append(event.to_dict())
-
+event_list = [doc.to_dict() for doc in events_stream]
 events_df = pd.DataFrame(event_list)
 
-if "approved" in events_df.columns:
-    events_public = events_df[events_df["approved"] == True]
-else:
-    events_public = events_df
+events_public = (
+    events_df[events_df["approved"] == True]
+    if "approved" in events_df.columns
+    else events_df
+)
 
 # -------------------------------------------------
 # UI LAYOUT
@@ -130,7 +149,6 @@ tab_map, tab_list, tab_form = st.tabs(["🗺️ Kartta", "📋 Lista", "➕ Lis�
 # -------------------------------------------------
 with tab_map:
     st.subheader("Maistiaiset kartalla")
-
     if events_public.empty:
         st.info("Ei tapahtumia kartalla.")
     else:
@@ -142,7 +160,6 @@ with tab_map:
 # -------------------------------------------------
 with tab_list:
     st.subheader("Tulevat maistiaiset")
-
     if events_public.empty:
         st.info("Ei tapahtumia listattavaksi.")
     else:
@@ -165,16 +182,15 @@ with tab_form:
         description = st.text_area("Description")
 
         start_date = st.date_input("Start Date")
-        start_time_input = st.time_input("Start Time")
-
+        start_time_val = st.time_input("Start Time")
         end_date = st.date_input("End Date")
-        end_time_input = st.time_input("End Time")
+        end_time_val = st.time_input("End Time")
 
         submitted = st.form_submit_button("Create Event")
 
         if submitted:
-            start_dt = datetime.combine(start_date, start_time_input)
-            end_dt = datetime.combine(end_date, end_time_input)
+            start_dt = datetime.combine(start_date, start_time_val)
+            end_dt = datetime.combine(end_date, end_time_val)
 
             doc = {
                 "product_name": product_name,
