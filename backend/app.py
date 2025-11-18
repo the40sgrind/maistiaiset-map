@@ -34,6 +34,11 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 # -------------------------------------------------
+# ADMIN PASSWORD (FROM STREAMLIT SECRETS)
+# -------------------------------------------------
+ADMIN_PASSWORD = st.secrets["admin"]["password"]
+
+# -------------------------------------------------
 # HELPER FUNCTIONS
 # -------------------------------------------------
 def format_time(dt):
@@ -41,8 +46,9 @@ def format_time(dt):
         return dt.strftime("%d.%m.%Y klo %H:%M")
     return str(dt)
 
+
 def render_event_card(event):
-    """Render a dark-mode card using an HTML iframe (SAFE + GUARANTEED rendering)."""
+    """Render a dark-mode card using an HTML iframe."""
     product_name = event.get("product_name", "")
     brand_id = event.get("brand_id", "")
     store_name = event.get("store_name", "")
@@ -59,21 +65,16 @@ def render_event_card(event):
     <html>
     <body style="margin:0; padding:0; background-color:#0e1117;">
         <div style="
-            border-radius: 12px;
-            border: 1px solid #333;
-            padding: 18px;
-            margin-bottom: 16px;
-            background-color: #1e1e1e;
-            color: #f2f2f2;
-            font-family: sans-serif;
+            border-radius:12px;
+            border:1px solid #333;
+            padding:18px;
+            margin-bottom:16px;
+            background-color:#1e1e1e;
+            color:#f2f2f2;
+            font-family:sans-serif;
         ">
 
-            <div style="
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 8px;
-            ">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div style="font-weight:700; font-size:1.2rem; color:#ffffff;">
                     {product_name}
                     <span style="font-weight:400; color:#bbbbbb;">
@@ -94,15 +95,15 @@ def render_event_card(event):
                 </div>
             </div>
 
-            <div style="font-size:1rem; margin-top:6px; color:#e0e0e0;">
+            <div style="margin-top:6px; color:#e0e0e0;">
                 {store_name} • {address}
             </div>
 
-            <div style="font-size:0.9rem; margin-top:6px; color:#cccccc;">
+            <div style="margin-top:6px; color:#cccccc; font-size:0.9rem;">
                 {start_time} – {end_time}
             </div>
 
-            <div style="font-size:1rem; margin-top:10px; color:#f2f2f2;">
+            <div style="margin-top:10px;">
                 {description}
             </div>
 
@@ -111,29 +112,41 @@ def render_event_card(event):
     </html>
     """
 
-    # Use an iframe to bypass Streamlit's markdown escaping forever
-    iframe_id = str(uuid.uuid4()).replace("-", "")
-    iframe_html = f"""
-        <iframe id="{iframe_id}" srcdoc='{html}' 
+    iframe_id = uuid.uuid4().hex
+    iframe = f"""
+        <iframe id="{iframe_id}" srcdoc='{html}'
             style="width:100%; height:260px; border:none; overflow:hidden;">
         </iframe>
     """
-    st.components.v1.html(iframe_html, height=260)
+
+    st.components.v1.html(iframe, height=260)
 
 # -------------------------------------------------
-# FETCH EVENTS
+# FETCH ALL EVENTS FROM FIRESTORE
 # -------------------------------------------------
 events_ref = db.collection("events")
 events_stream = events_ref.stream()
 
-event_list = [doc.to_dict() for doc in events_stream]
-events_df = pd.DataFrame(event_list)
+events_list = []
+events_raw = []
+for doc in events_stream:
+    data = doc.to_dict()
+    data["id"] = doc.id
+    events_raw.append(data)
 
-events_public = (
-    events_df[events_df["approved"] == True]
-    if "approved" in events_df.columns
-    else events_df
-)
+events_df = pd.DataFrame(events_raw)
+
+# Public events (approved only)
+if "approved" in events_df.columns:
+    events_public = events_df[events_df["approved"] == True]
+else:
+    events_public = events_df
+
+# Pending events
+if "approved" in events_df.columns:
+    events_pending = events_df[events_df["approved"] == False]
+else:
+    events_pending = pd.DataFrame()
 
 # -------------------------------------------------
 # UI LAYOUT
@@ -142,7 +155,9 @@ st.title("Maistiaiset Map")
 st.caption("Kaikki Suomen ilmaiset maistiaiset yhdessä sovelluksessa.")
 st.markdown("---")
 
-tab_map, tab_list, tab_form = st.tabs(["🗺️ Kartta", "📋 Lista", "➕ Lisää tapahtuma"])
+tab_map, tab_list, tab_form, tab_admin = st.tabs(
+    ["🗺️ Kartta", "📋 Lista", "➕ Lisää tapahtuma", "🔑 Admin"]
+)
 
 # -------------------------------------------------
 # MAP TAB
@@ -202,8 +217,53 @@ with tab_form:
                 "description": description,
                 "start_time": start_dt,
                 "end_time": end_dt,
-                "approved": True
+                "approved": False  # NOW pending
             }
 
             db.collection("events").add(doc)
-            st.success("Event added successfully!")
+            st.success("Event submitted for approval!")
+
+
+# -------------------------------------------------
+# ADMIN TAB
+# -------------------------------------------------
+with tab_admin:
+    st.subheader("Admin Dashboard")
+
+    # Login form
+    if "admin_logged_in" not in st.session_state:
+        st.session_state.admin_logged_in = False
+
+    if not st.session_state.admin_logged_in:
+        entered_pw = st.text_input("Enter Admin Password:", type="password")
+        if st.button("Login"):
+            if entered_pw == ADMIN_PASSWORD:
+                st.session_state.admin_logged_in = True
+                st.success("Logged in!")
+            else:
+                st.error("Incorrect password.")
+        st.stop()
+
+    # Admin content
+    st.success("Admin logged in.")
+
+    st.markdown("### Pending Events")
+    if events_pending.empty:
+        st.info("No pending events.")
+    else:
+        for _, row in events_pending.iterrows():
+            render_event_card(row)
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                if st.button("✔ Approve", key=f"approve_{row['id']}"):
+                    db.collection("events").document(row["id"]).update({"approved": True})
+                    st.success("Event approved.")
+                    st.rerun()
+
+            with col2:
+                if st.button("❌ Delete", key=f"delete_{row['id']}"):
+                    db.collection("events").document(row["id"]).delete()
+                    st.warning("Event deleted.")
+                    st.rerun()
