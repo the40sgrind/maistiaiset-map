@@ -2,32 +2,8 @@ import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
 import pandas as pd
-from datetime import datetime, time, timedelta
-
-import requests
-
-def geocode_address(address):
-    """Return (lat, lon) or None if not found."""
-    try:
-        url = "https://nominatim.openstreetmap.org/search"
-        params = {
-            "q": address,
-            "format": "json",
-            "limit": 1,
-            "addressdetails": 1,
-            "countrycodes": "fi",  # Prioritize Finland first
-        }
-
-        response = requests.get(url, params=params, headers={"User-Agent": "MaistiaisetMap/1.0"})
-        data = response.json()
-
-        if len(data) == 0:
-            return None
-
-        return float(data[0]["lat"]), float(data[0]["lon"])
-
-    except Exception:
-        return None
+from datetime import datetime, time
+import requests  # for geocoding
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -51,7 +27,7 @@ if not firebase_admin._apps:
         "token_uri": firebase_config["token_uri"],
         "auth_provider_x509_cert_url": firebase_config["auth_provider_x509_cert_url"],
         "client_x509_cert_url": firebase_config["client_x509_cert_url"],
-        "universe_domain": "googleapis.com"
+        "universe_domain": "googleapis.com",
     })
     firebase_admin.initialize_app(cred, {
         "storageBucket": "maistiaisetmap-images"
@@ -71,6 +47,7 @@ translations = {
         "brand_id": "Brändin ID",
         "store_name": "Myymälä",
         "address": "Osoite",
+        "city": "Kaupunki",
 
         "map_tab": "🗺️ Kartta",
         "list_tab": "📋 Lista",
@@ -114,6 +91,7 @@ translations = {
         "brand_id": "Brand ID",
         "store_name": "Store Name",
         "address": "Address",
+        "city": "City",
 
         "map_tab": "🗺️ Map",
         "list_tab": "📋 List",
@@ -157,6 +135,7 @@ translations = {
         "brand_id": "Varumärkes-ID",
         "store_name": "Butik",
         "address": "Adress",
+        "city": "Stad",
 
         "map_tab": "🗺️ Karta",
         "list_tab": "📋 Lista",
@@ -190,7 +169,7 @@ translations = {
         "filter_from": "Från datum",
         "filter_to": "Till datum",
         "filter_clear": "Rensa filter",
-    }
+    },
 }
 
 # -------------------------------------------------
@@ -210,7 +189,7 @@ if lang_cols[2].button("🇸🇪 Svenska"):
 T = translations[st.session_state["lang"]]
 
 # -------------------------------------------------
-# TITLE + SMALL MOBILE SPACING IMPROVEMENT
+# TITLE + SPACING
 # -------------------------------------------------
 st.title(T["app_title"])
 st.caption(T["subtitle"])
@@ -218,7 +197,7 @@ st.markdown("<div style='margin-top:-10px;'></div>", unsafe_allow_html=True)
 st.markdown("---")
 
 # -------------------------------------------------
-# MOBILE-FRIENDLY TAB BAR (slightly tighter)
+# MOBILE-FRIENDLY TABS
 # -------------------------------------------------
 tab_keys = ["map", "list", "form", "admin"]
 tab_labels = [T["map_tab"], T["list_tab"], T["form_tab"], T["admin_tab"]]
@@ -229,7 +208,7 @@ active_label = st.radio(
     index=tab_keys.index(st.session_state["active_tab"]),
     horizontal=True,
     key="tab_selector",
-    label_visibility="collapsed"
+    label_visibility="collapsed",
 )
 
 active = tab_keys[tab_labels.index(active_label)]
@@ -241,20 +220,15 @@ if active != st.session_state["active_tab"]:
 st.markdown("<div style='margin-bottom:6px;'></div>", unsafe_allow_html=True)
 
 # -------------------------------------------------
-# FILTERS (Step 7) — unchanged logic but tighter layout
+# FILTER HELPERS
 # -------------------------------------------------
 def to_date(val):
-    if hasattr(val, "date"):
-        try:
-            return val.date()
-        except:
-            pass
     try:
         parsed = pd.to_datetime(val, utc=False)
         if pd.isna(parsed):
             return None
         return parsed.date()
-    except:
+    except Exception:
         return None
 
 def apply_filters(df):
@@ -265,8 +239,8 @@ def apply_filters(df):
     df["start_date_clean"] = df["start_time"].apply(to_date)
     df["end_date_clean"] = df["end_time"].apply(to_date)
 
-    brands = sorted([b for b in df.get("brand_id", pd.Series([])).dropna().unique() if b])
-    stores = sorted([s for s in df.get("store_name", pd.Series([])).dropna().unique() if s])
+    brands = sorted([b for b in df.get("brand_id", []).dropna().unique() if b])
+    stores = sorted([s for s in df.get("store_name", []).dropna().unique() if s])
 
     st.markdown(f"### {T['filters_title']}")
 
@@ -307,150 +281,79 @@ def apply_filters(df):
 events = db.collection("events").stream()
 events_list = [e.to_dict() for e in events]
 events_df = pd.DataFrame(events_list)
+
 events_public = (
     events_df[events_df["approved"] == True] if "approved" in events_df else events_df
 )
 
 filtered_df = apply_filters(events_public)
-
 # -------------------------------------------------
-# TIME CLEANER (display only)
-# -------------------------------------------------
-def clean_time(v):
-    try:
-        if hasattr(v, "strftime"):
-            return v.strftime("%H:%M")
-    except:
-        pass
-
-    s = str(v).strip()
-
-    if " " in s and ":" in s:
-        try:
-            return datetime.fromisoformat(s.replace("Z", "")).strftime("%H:%M")
-        except:
-            pass
-
-    if len(s) == 5 and s[2] == ":":
-        return s
-
-    if "klo" in s:
-        try:
-            return s.split("klo")[1].strip()
-        except:
-            pass
-
-    return s
-
-# -------------------------------------------------
-# EVENT CARD (Step 9 Polish – Medium image, compact Nordic style)
+# EVENT CARD (mobile-friendly + safe fallback image)
 # -------------------------------------------------
 def render_event_card(event):
-    start = clean_time(event.get("start_time"))
-    end = clean_time(event.get("end_time"))
+    img_url = event.get("image_url")
 
-    image_url = event.get("image_url")
+    # Determine if image URL is valid
+    valid_image = False
+    if img_url and isinstance(img_url, str) and img_url.startswith("http"):
+        valid_image = True
 
-    # Validate URL: must be a non-empty string
-    valid_image = (
-        image_url
-        and isinstance(image_url, str)
-        and image_url.strip()
-        and image_url.strip().lower() not in ["none", "null"]
-    )
-
-    if valid_image:
-        image_html = f"""
-        <div style="
-            width: 100%;
-            max-height: 210px;
-            overflow: hidden;
-            border-radius: 10px;
-            margin-bottom: 10px;
-        ">
-            <img src='{image_url}' style="
-                width: 100%;
-                height: 210px;
-                object-fit: cover;
-                border-radius: 10px;
-            "/>
-        </div>
-        """
-    else:
-        image_html = """
-        <div style="
-            height: 180px;
-            border-radius: 10px;
-            margin-bottom: 10px;
-            background: #2b2b2b;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #777;
-            font-size: 0.9rem;
-        ">
+    if not valid_image:
+        img_html = """
+        <div style="width:100%; height:180px; background:#333;
+                    border-radius:10px; display:flex; justify-content:center;
+                    align-items:center; color:#bbb; font-size:0.9rem;">
             No image
         </div>
         """
+    else:
+        img_html = f"""
+        <img src="{img_url}" style="width:100%; height:180px; object-fit:cover;
+             border-radius:10px;" onerror="this.style.display='none';" />
+        """
 
-    # --- Card container (compact, Finnish minimal) ---
     html = f"""
-    <div style="
-        border-radius: 12px;
-        border: 1px solid #333;
-        padding: 14px;
-        margin-bottom: 14px;
-        background-color: #1e1e1e;
-        color: #f2f2f2;
-        line-height: 1.28;
-    ">
+    <div style="border-radius:12px; border:1px solid #333; padding:16px;
+                margin-bottom:18px; background-color:#1e1e1e; color:#f2f2f2;">
 
-        {image_html}
+        {img_html}
 
-        <div style="
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 6px;
-        ">
-            <div style="font-weight: 700; font-size: 1.1rem;">
+        <div style="margin-top:10px; display:flex; justify-content:space-between;
+                    align-items:center;">
+
+            <div style="font-weight:700; font-size:1.15rem;">
                 {event.get('product_name','')}
                 <span style="font-weight:400; color:#bbbbbb;">
-                    {('– ' + event.get('brand_id','')) if event.get('brand_id') else ''}
+                    {(" – " + event.get('brand_id','')) if event.get('brand_id') else ""}
                 </span>
             </div>
 
-            <div style="
-                font-size: 0.75rem;
-                padding: 2px 8px;
-                border-radius: 999px;
-                background-color: #00c85333;
-                color: #00c853;
-                border: 1px solid #00c85355;
-                font-weight: 600;
-            ">
+            <div style="font-size:0.75rem; padding:3px 10px; border-radius:999px;
+                        background-color:#00c85333; color:#00c853;
+                        border:1px solid #00c85355; font-weight:600;">
                 {T["approved"]}
             </div>
         </div>
 
-        <div style="color:#d0d0d0; margin-top:4px; font-size:0.92rem;">
-            {event.get('store_name','')} • {event.get('address','')}
+        <div style="color:#ccc; margin-top:6px;">
+            {event.get('store_name','')} • {event.get('address','')}, {event.get('city','')}
         </div>
 
-        <div style="color:#bcbcbc; margin-top:4px;">
-            {start} – {end}
+        <div style="color:#aaa; margin-top:6px;">
+            {event.get('start_time','')} – {event.get('end_time','')}
         </div>
 
-        <div style="margin-top:8px; color:#e6e6e6; font-size:0.95rem;">
+        <div style="margin-top:10px; color:#e0e0e0;">
             {event.get('description','')}
         </div>
+
     </div>
     """
-
     st.html(html)
 
+
 # -------------------------------------------------
-# MAP TAB (very small UI polish)
+# MAP TAB
 # -------------------------------------------------
 if st.session_state["active_tab"] == "map":
     if filtered_df.empty:
@@ -459,8 +362,9 @@ if st.session_state["active_tab"] == "map":
         mdf = filtered_df.rename(columns={"latitude": "lat", "longitude": "lon"})
         st.map(mdf[["lat", "lon"]])
 
+
 # -------------------------------------------------
-# LIST TAB (uses new Nordic-polished event cards)
+# LIST TAB
 # -------------------------------------------------
 if st.session_state["active_tab"] == "list":
     if filtered_df.empty:
@@ -468,9 +372,33 @@ if st.session_state["active_tab"] == "list":
     else:
         for _, row in filtered_df.iterrows():
             render_event_card(row)
+# -------------------------------------------------
+# GEOCODING FUNCTION (Address + City)
+# -------------------------------------------------
+def geocode_address(address, city):
+    """Return (lat, lon) or None if not found."""
+    try:
+        query = f"{address}, {city}, Finland"
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            "q": query,
+            "format": "json",
+            "limit": 1,
+            "addressdetails": 1,
+            "countrycodes": "fi",
+        }
+        response = requests.get(
+            url, params=params, headers={"User-Agent": "MaistiaisetMap/1.0"}
+        )
+        data = response.json()
+        if len(data) == 0:
+            return None
+        return float(data[0]["lat"]), float(data[0]["lon"])
+    except Exception:
+        return None
 
 # -------------------------------------------------
-# FORM TAB (Step 8 image upload + Step 9 spacing polish)
+# FORM TAB
 # -------------------------------------------------
 if st.session_state["active_tab"] == "form":
     st.subheader(T["form_tab"])
@@ -487,15 +415,14 @@ if st.session_state["active_tab"] == "form":
         brand_id = st.text_input(T["brand_id"])
         store_name = st.text_input(T["store_name"])
         address = st.text_input(T["address"])
+        city = st.text_input(T["city"])
+        description = st.text_area("Description")
 
         st.markdown("<div style='margin-bottom:6px;'></div>", unsafe_allow_html=True)
 
-        # ---------------------------
         # IMAGE UPLOAD
-        # ---------------------------
-        image_file = st.file_uploader("Event Image (optional)", type=["png", "jpg", "jpeg"])
-
-        st.markdown("<div style='margin-bottom:6px;'></div>", unsafe_allow_html=True)
+        # collect an optional image file; upload will occur after the Firestore doc is created
+        image_file = st.file_uploader("Image (optional)", type=["jpg", "jpeg", "png"])
 
         # ---------------------------
         # TIME INPUTS
@@ -523,102 +450,126 @@ if st.session_state["active_tab"] == "form":
 
         submitted = st.form_submit_button(T["create_event"])
 
-if submitted:
+        if submitted:
+            # TIME STRINGS
+            start_str = (
+                start_time_val if manual_times else start_time_val.strftime("%H:%M")
+            )
+            end_str = (
+                end_time_val if manual_times else end_time_val.strftime("%H:%M")
+            )
 
-    # ---------------------------
-    # TIME STRINGS
-    # ---------------------------
-    start_str = start_time_val if manual_times else start_time_val.strftime("%H:%M")
-    end_str = end_time_val if manual_times else end_time_val.strftime("%H:%M")
+            # GEOCODE
+            coords = geocode_address(address, city)
+            if not coords:
+                st.error(
+                    "Could not find this address. Please check spelling or add city name."
+                )
+                st.stop()
 
-    # ---------------------------
-    # CREATE BASE EVENT DOC
-    # ---------------------------
+            lat, lon = coords
 
-    # GEOCODE THE ADDRESS
-    coords = geocode_address(address)
+            # BASE DOC
+            base_doc = {
+                "product_name": product_name,
+                "brand_id": brand_id,
+                "store_name": store_name,
+                "address": address,
+                "city": city,
+                "latitude": lat,
+                "longitude": lon,
+                "description": description,
+                "start_time": f"{start_date} {start_str}",
+                "end_time": f"{end_date} {end_str}",
+                "approved": False,
+            }
 
-    if not coords:
-        st.error("Could not find this address. Please check the spelling or try adding city name.")
-        st.stop()
+            # Create Firestore doc
+            doc_ref = db.collection("events").document()
+            doc_ref.set(base_doc)
+            doc_id = doc_ref.id
 
-    lat, lon = coords
+            # IMAGE UPLOAD (fixed for uniform bucket-level access)
+            if image_file:
+                try:
+                    blob = bucket.blob(f"events/{doc_id}/image.jpg")
+                    blob.upload_from_file(image_file, content_type=image_file.type)
 
-    # ---------------------------
-    # CREATE BASE EVENT DOC WITH GEOCOORDS
-    # ---------------------------
-    base_doc = {
-        "product_name": product_name,
-        "brand_id": brand_id,
-        "store_name": store_name,
-        "address": address,
-        "latitude": lat,
-        "longitude": lon,
-        "description": "",
-        "start_time": f"{start_date} {start_str}",
-        "end_time": f"{end_date} {end_str}",
-        "approved": False,
-    }
+                    # Public URL format that works with uniform access
+                    image_url = (
+                        f"https://storage.googleapis.com/{bucket.name}/events/{doc_id}/image.jpg"
+                    )
 
-    # Create empty event doc to get ID
-    doc_ref = db.collection("events").add(base_doc)[1]
-    doc_id = doc_ref.id
+                    doc_ref.update({"image_url": image_url})
 
-    image_url = None
+                except Exception as e:
+                    st.warning(f"Image upload failed: {e}")
 
-    # ---------------------------
-    # UPLOAD IMAGE IF PROVIDED
-    # ---------------------------
-    if image_file:
-        blob = bucket.blob(f"events/{doc_id}/image.jpg")
-        blob.upload_from_file(image_file, content_type=image_file.type)
-        blob.make_public()  # Simple for MVP
-
-        image_url = blob.public_url
-
-        # Update event with image URL
-        doc_ref.update({"image_url": image_url})
-
-    st.success("Event submitted for approval!")
+            st.success("Event submitted for approval!")
 
 # -------------------------------------------------
-# ADMIN TAB (light spacing polish)
+# ADMIN TAB (includes Approve + Delete)
 # -------------------------------------------------
 if st.session_state["active_tab"] == "admin":
     st.subheader(T["login_title"])
 
+    # Password field
     pwd = st.text_input(T["password"], type="password")
+
+    # Login button
     if st.button(T["login_button"]):
         if pwd == st.secrets["admin"]["password"]:
             st.session_state["admin_logged_in"] = True
         else:
             st.error(T["wrong_password"])
 
+    # If logged in, show pending + approved events
     if st.session_state.get("admin_logged_in"):
         st.header(T["admin_panel"])
 
-        pending = (
-            events_df[events_df["approved"] == False]
-            if "approved" in events_df
-            else pd.DataFrame()
-        )
+        # Show ALL events (pending + approved)
+        all_events = events_df if not events_df.empty else pd.DataFrame()
 
-        for index, row in pending.iterrows():
-            st.write("---")
-            st.write(f"**{row['product_name']} – {row.get('brand_id','')}**")
-            st.write(row["store_name"], "•", row["address"])
-            st.write(f"{row['start_time']} – {row['end_time']}")
-            st.write(row.get("description", ""))
+        if all_events.empty:
+            st.info("No events available.")
+        else:
+            for index, row in all_events.iterrows():
+                st.write("---")
+                st.write(f"**{row['product_name']} – {row.get('brand_id','')}**")
+                st.write(row["store_name"], "•", row["address"], "•", row.get("city", ""))
+                st.write(f"{row['start_time']} – {row['end_time']}")
+                st.write(row.get("description", ""))
 
-            # Approve button
-            if st.button(T["approve_button"], key=f"approve_{index}"):
-                matches = (
-                    db.collection("events")
-                    .where("product_name", "==", row["product_name"])
-                    .stream()
-                )
-                for ev in matches:
-                    db.collection("events").document(ev.id).update({"approved": True})
+                colA, colB = st.columns([1, 1])
 
-                st.success(T["approved_msg"])
-                st.rerun()
+                # APPROVE BUTTON
+                with colA:
+                    if not row.get("approved", False):
+                        if st.button(T["approve_button"], key=f"approve_{index}"):
+                            matches = (
+                                db.collection("events")
+                                .where("product_name", "==", row["product_name"])
+                                .stream()
+                            )
+                            for ev in matches:
+                                db.collection("events").document(ev.id).update(
+                                    {"approved": True}
+                                )
+                            st.success(T["approved_msg"])
+                            st.rerun()
+                    else:
+                        st.success("Approved")
+
+                # DELETE BUTTON
+                with colB:
+                    if st.button("Delete", key=f"delete_{index}"):
+                        matches = (
+                            db.collection("events")
+                            .where("product_name", "==", row["product_name"])
+                            .stream()
+                        )
+                        for ev in matches:
+                            db.collection("events").document(ev.id).delete()
+
+                        st.warning("Event deleted.")
+                        st.rerun()
