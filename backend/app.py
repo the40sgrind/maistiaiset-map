@@ -326,8 +326,15 @@ def render_event_card(event):
 
     image_url = event.get("image_url")
 
-    # --- Image block ---
-    if image_url:
+    # Validate URL: must be a non-empty string
+    valid_image = (
+        image_url
+        and isinstance(image_url, str)
+        and image_url.strip()
+        and image_url.strip().lower() not in ["none", "null"]
+    )
+
+    if valid_image:
         image_html = f"""
         <div style="
             width: 100%;
