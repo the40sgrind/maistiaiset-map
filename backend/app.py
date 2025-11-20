@@ -4,6 +4,31 @@ from firebase_admin import credentials, firestore, storage
 import pandas as pd
 from datetime import datetime, time, timedelta
 
+import requests
+
+def geocode_address(address):
+    """Return (lat, lon) or None if not found."""
+    try:
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            "q": address,
+            "format": "json",
+            "limit": 1,
+            "addressdetails": 1,
+            "countrycodes": "fi",  # Prioritize Finland first
+        }
+
+        response = requests.get(url, params=params, headers={"User-Agent": "MaistiaisetMap/1.0"})
+        data = response.json()
+
+        if len(data) == 0:
+            return None
+
+        return float(data[0]["lat"]), float(data[0]["lon"])
+
+    except Exception:
+        return None
+
 # -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
@@ -498,50 +523,63 @@ if st.session_state["active_tab"] == "form":
 
         submitted = st.form_submit_button(T["create_event"])
 
-        if submitted:
+if submitted:
 
-            # ---------------------------
-            # TIME STRINGS
-            # ---------------------------
-            start_str = start_time_val if manual_times else start_time_val.strftime("%H:%M")
-            end_str = end_time_val if manual_times else end_time_val.strftime("%H:%M")
+    # ---------------------------
+    # TIME STRINGS
+    # ---------------------------
+    start_str = start_time_val if manual_times else start_time_val.strftime("%H:%M")
+    end_str = end_time_val if manual_times else end_time_val.strftime("%H:%M")
 
-            # ---------------------------
-            # CREATE BASE EVENT DOC
-            # ---------------------------
-            base_doc = {
-                "product_name": product_name,
-                "brand_id": brand_id,
-                "store_name": store_name,
-                "address": address,
-                "latitude": 0.0,
-                "longitude": 0.0,
-                "description": "",
-                "start_time": f"{start_date} {start_str}",
-                "end_time": f"{end_date} {end_str}",
-                "approved": False,
-            }
+    # ---------------------------
+    # CREATE BASE EVENT DOC
+    # ---------------------------
 
-            # Create empty event doc to get ID
-            doc_ref = db.collection("events").add(base_doc)[1]
-            doc_id = doc_ref.id
+    # GEOCODE THE ADDRESS
+    coords = geocode_address(address)
 
-            image_url = None
+    if not coords:
+        st.error("Could not find this address. Please check the spelling or try adding city name.")
+        st.stop()
 
-            # ---------------------------
-            # UPLOAD IMAGE IF PROVIDED
-            # ---------------------------
-            if image_file:
-                blob = bucket.blob(f"events/{doc_id}/image.jpg")
-                blob.upload_from_file(image_file, content_type=image_file.type)
-                blob.make_public()  # Simple for MVP
+    lat, lon = coords
 
-                image_url = blob.public_url
+    # ---------------------------
+    # CREATE BASE EVENT DOC WITH GEOCOORDS
+    # ---------------------------
+    base_doc = {
+        "product_name": product_name,
+        "brand_id": brand_id,
+        "store_name": store_name,
+        "address": address,
+        "latitude": lat,
+        "longitude": lon,
+        "description": "",
+        "start_time": f"{start_date} {start_str}",
+        "end_time": f"{end_date} {end_str}",
+        "approved": False,
+    }
 
-                # Update event with image URL
-                doc_ref.update({"image_url": image_url})
+    # Create empty event doc to get ID
+    doc_ref = db.collection("events").add(base_doc)[1]
+    doc_id = doc_ref.id
 
-            st.success("Event submitted for approval!")
+    image_url = None
+
+    # ---------------------------
+    # UPLOAD IMAGE IF PROVIDED
+    # ---------------------------
+    if image_file:
+        blob = bucket.blob(f"events/{doc_id}/image.jpg")
+        blob.upload_from_file(image_file, content_type=image_file.type)
+        blob.make_public()  # Simple for MVP
+
+        image_url = blob.public_url
+
+        # Update event with image URL
+        doc_ref.update({"image_url": image_url})
+
+    st.success("Event submitted for approval!")
 
 # -------------------------------------------------
 # ADMIN TAB (light spacing polish)
