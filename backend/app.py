@@ -3,7 +3,9 @@ import firebase_admin
 from firebase_admin import credentials, firestore, storage
 import pandas as pd
 from datetime import datetime, time
-import requests  # for geocoding
+import requests
+import folium
+from streamlit_folium import st_folium
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -11,27 +13,106 @@ import requests  # for geocoding
 st.set_page_config(page_title="Maistiaiset Map", layout="wide")
 
 # -------------------------------------------------
+# MOBILE OPTIMIZATION (CSS + JS)
+# -------------------------------------------------
+st.markdown("""
+<style>
+
+    /* Remove Streamlit's massive default padding */
+    .stApp {
+        padding: 0 !important;
+    }
+
+    .block-container {
+        padding-top: 1rem !important;
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+        padding-bottom: 1rem !important;
+        max-width: 100% !important;
+    }
+
+    /* Make radio tabs easier to tap on mobile */
+    div[role='radiogroup'] > label {
+        padding: 8px 14px !important;
+        margin-right: 6px !important;
+        border-radius: 10px !important;
+        font-size: 1rem !important;
+    }
+
+    /* Responsive title spacing */
+    h1 {
+        font-size: 1.7rem !important;
+        margin-bottom: -4px !important;
+    }
+
+    /* Reduce spacing between cards on mobile */
+    @media (max-width: 640px) {
+        .event-card {
+            margin-bottom: 14px !important;
+        }
+    }
+
+    /* Improve Folium map usability on phones */
+    @media (max-width: 640px) {
+        iframe {
+            height: 360px !important;
+        }
+    }
+
+</style>
+""", unsafe_allow_html=True)
+
+
+# -------------------------------------------------
+# JS: Detect mobile & store in session_state
+# -------------------------------------------------
+mobile_detection_js = """
+<script>
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    window.parent.postMessage({isMobile: isMobile}, "*");
+</script>
+"""
+
+st.markdown(mobile_detection_js, unsafe_allow_html=True)
+
+# Streamlit listener
+mobile_flag = st.session_state.get("is_mobile", None)
+
+def _mobile_listener():
+    import streamlit as st
+    msg = st.session_state.get("_js_message")
+    if isinstance(msg, dict) and "isMobile" in msg:
+        st.session_state["is_mobile"] = msg["isMobile"]
+
+st.session_state.setdefault("_js_message", None)
+
+# -------------------------------------------------
 # FIREBASE INIT
 # -------------------------------------------------
 firebase_config = st.secrets["firebase"]
 
 if not firebase_admin._apps:
-    cred = credentials.Certificate({
-        "type": firebase_config["type"],
-        "project_id": firebase_config["project_id"],
-        "private_key_id": firebase_config["private_key_id"],
-        "private_key": firebase_config["private_key"],
-        "client_email": firebase_config["client_email"],
-        "client_id": firebase_config["client_id"],
-        "auth_uri": firebase_config["auth_uri"],
-        "token_uri": firebase_config["token_uri"],
-        "auth_provider_x509_cert_url": firebase_config["auth_provider_x509_cert_url"],
-        "client_x509_cert_url": firebase_config["client_x509_cert_url"],
-        "universe_domain": "googleapis.com",
-    })
-    firebase_admin.initialize_app(cred, {
-        "storageBucket": "maistiaisetmap-images"
-    })
+    cred = credentials.Certificate(
+        {
+            "type": firebase_config["type"],
+            "project_id": firebase_config["project_id"],
+            "private_key_id": firebase_config["private_key_id"],
+            "private_key": firebase_config["private_key"],
+            "client_email": firebase_config["client_email"],
+            "client_id": firebase_config["client_id"],
+            "auth_uri": firebase_config["auth_uri"],
+            "token_uri": firebase_config["token_uri"],
+            "auth_provider_x509_cert_url": firebase_config["auth_provider_x509_cert_url"],
+            "client_x509_cert_url": firebase_config["client_x509_cert_url"],
+            "universe_domain": firebase_config.get("universe_domain", "googleapis.com"),
+        }
+    )
+    firebase_admin.initialize_app(
+        cred,
+        {
+            "storageBucket": "maistiaisetmap-images",
+        },
+    )
 
 db = firestore.client()
 
@@ -197,7 +278,7 @@ st.markdown("<div style='margin-top:-10px;'></div>", unsafe_allow_html=True)
 st.markdown("---")
 
 # -------------------------------------------------
-# MOBILE-FRIENDLY TABS
+# TABS (RADIO NAVIGATION)
 # -------------------------------------------------
 tab_keys = ["map", "list", "form", "admin"]
 tab_labels = [T["map_tab"], T["list_tab"], T["form_tab"], T["admin_tab"]]
@@ -220,25 +301,54 @@ if active != st.session_state["active_tab"]:
 st.markdown("<div style='margin-bottom:6px;'></div>", unsafe_allow_html=True)
 
 # -------------------------------------------------
-# FILTER HELPERS
+# DATE/TIME HELPERS
 # -------------------------------------------------
-def to_date(val):
+def to_datetime(val):
+    """Best-effort conversion of Firestore Timestamp / string → datetime."""
+    if val is None or val == "":
+        return None
+    if isinstance(val, datetime):
+        return val
+    if hasattr(val, "to_datetime"):
+        try:
+            return val.to_datetime()
+        except Exception:
+            pass
     try:
-        parsed = pd.to_datetime(val, utc=False)
-        if pd.isna(parsed):
-            return None
-        return parsed.date()
+        return pd.to_datetime(val)
     except Exception:
         return None
 
-def apply_filters(df):
-    if df.empty:
+
+def format_dt_eu(val):
+    """Return DD-MM-YYYY HH:MM or empty string."""
+    dt = to_datetime(val)
+    if dt is None or pd.isna(dt):
+        return ""
+    return dt.strftime("%d-%m-%Y %H:%M")
+
+
+def to_date(val):
+    """Return date() from datetime-like, or None."""
+    dt = to_datetime(val)
+    if dt is None or pd.isna(dt):
+        return None
+    return dt.date()
+# -------------------------------------------------
+# FILTER HELPERS (FINAL – KEEP ALL COLUMNS)
+# -------------------------------------------------
+def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter events by brand, store, and date — without dropping columns."""
+    if df is None or df.empty:
         return df
 
     df = df.copy()
+
+    # Extract clean date columns (for filtering)
     df["start_date_clean"] = df["start_time"].apply(to_date)
     df["end_date_clean"] = df["end_time"].apply(to_date)
 
+    # Dropdown values
     brands = sorted([b for b in df.get("brand_id", []).dropna().unique() if b])
     stores = sorted([s for s in df.get("store_name", []).dropna().unique() if s])
 
@@ -275,28 +385,84 @@ def apply_filters(df):
     st.markdown("<div style='margin-bottom:4px;'></div>", unsafe_allow_html=True)
     return f
 
+
 # -------------------------------------------------
-# FETCH EVENTS
+# FETCH EVENTS + INCLUDE FIRESTORE DOC IDS
 # -------------------------------------------------
-events = db.collection("events").stream()
-events_list = [e.to_dict() for e in events]
+events_raw = db.collection("events").stream()
+
+events_list = []
+for e in events_raw:
+    doc = e.to_dict()
+    doc["id"] = e.id            # <-- Firestore doc ID added
+    events_list.append(doc)
+
 events_df = pd.DataFrame(events_list)
 
-events_public = (
-    events_df[events_df["approved"] == True] if "approved" in events_df else events_df
-)
+# Only approved events appear publicly
+if not events_df.empty and "approved" in events_df.columns:
+    events_public = events_df[events_df["approved"] == True].copy()
+else:
+    events_public = events_df.copy()
 
-filtered_df = apply_filters(events_public)
+
 # -------------------------------------------------
-# EVENT CARD (mobile-friendly + safe fallback image)
+# NORMALIZE FIELDS (NO TYPE DAMAGE)
 # -------------------------------------------------
-def render_event_card(event):
+def fix_datetime(v):
+    """Convert Firestore Timestamp or string to datetime."""
+    if v is None or v == "":
+        return None
+    if hasattr(v, "to_datetime"):
+        try:
+            return v.to_datetime()
+        except:
+            pass
+    try:
+        return pd.to_datetime(v)
+    except:
+        return None
+
+def normalize_events(df):
+    if df.empty:
+        return df
+
+    df = df.copy()
+
+    # preserve image_url, lat, lon, strings etc.
+    if "start_time" in df:
+        df["start_dt"] = df["start_time"].apply(fix_datetime)
+    if "end_time" in df:
+        df["end_dt"] = df["end_time"].apply(fix_datetime)
+
+    # derived EU formats for map/list
+    df["start_fmt"] = df["start_dt"].apply(
+        lambda x: x.strftime("%d-%m-%Y %H:%M") if x else ""
+    )
+    df["end_fmt"] = df["end_dt"].apply(
+        lambda x: x.strftime("%d-%m-%Y %H:%M") if x else ""
+    )
+
+    # clean date-only fields for filters
+    df["start_date_clean"] = df["start_dt"].apply(lambda x: x.date() if x else None)
+    df["end_date_clean"] = df["end_dt"].apply(lambda x: x.date() if x else None)
+
+    return df
+
+events_clean = normalize_events(events_public)
+
+# -------------------------------------------------
+# APPLY FILTERS
+# -------------------------------------------------
+filtered_df = apply_filters(events_clean.copy())
+
+
+# -------------------------------------------------
+# EVENT CARD (LIST TAB)
+# -------------------------------------------------
+def render_event_card(event: pd.Series) -> None:
     img_url = event.get("image_url")
-
-    # Determine if image URL is valid
-    valid_image = False
-    if img_url and isinstance(img_url, str) and img_url.startswith("http"):
-        valid_image = True
+    valid_image = img_url and isinstance(img_url, str) and img_url.startswith("http")
 
     if not valid_image:
         img_html = """
@@ -311,6 +477,9 @@ def render_event_card(event):
         <img src="{img_url}" style="width:100%; height:180px; object-fit:cover;
              border-radius:10px;" onerror="this.style.display='none';" />
         """
+
+    start_fmt = format_dt_eu(event.get("start_time"))
+    end_fmt = format_dt_eu(event.get("end_time"))
 
     html = f"""
     <div style="border-radius:12px; border:1px solid #333; padding:16px;
@@ -340,7 +509,7 @@ def render_event_card(event):
         </div>
 
         <div style="color:#aaa; margin-top:6px;">
-            {event.get('start_time','')} – {event.get('end_time','')}
+            {start_fmt} – {end_fmt}
         </div>
 
         <div style="margin-top:10px; color:#e0e0e0;">
@@ -353,17 +522,6 @@ def render_event_card(event):
 
 
 # -------------------------------------------------
-# MAP TAB
-# -------------------------------------------------
-if st.session_state["active_tab"] == "map":
-    if filtered_df.empty:
-        st.info(T["no_events_map"])
-    else:
-        mdf = filtered_df.rename(columns={"latitude": "lat", "longitude": "lon"})
-        st.map(mdf[["lat", "lon"]])
-
-
-# -------------------------------------------------
 # LIST TAB
 # -------------------------------------------------
 if st.session_state["active_tab"] == "list":
@@ -373,13 +531,143 @@ if st.session_state["active_tab"] == "list":
         for _, row in filtered_df.iterrows():
             render_event_card(row)
 # -------------------------------------------------
-# GEOCODING FUNCTION (Address + City)
+# MAP TAB (Folium – Dark Map + Violet Markers + Thumbnails)
+# -------------------------------------------------
+if st.session_state["active_tab"] == "map":
+
+    if filtered_df.empty:
+        st.info(T["no_events_map"])
+
+    else:
+        # Recompute formats from start_time / end_time to be safe
+        def format_dt_for_map(v):
+            try:
+                dt = to_datetime(v)
+                if dt:
+                    return dt.strftime("%d-%m-%Y %H:%M")
+                return ""
+            except Exception:
+                return ""
+
+        mdf = filtered_df.copy()
+        mdf["start_fmt"] = mdf["start_time"].apply(format_dt_for_map)
+        mdf["end_fmt"] = mdf["end_time"].apply(format_dt_for_map)
+
+        # Safe float conversion for lat/lon
+        def safe_float(x):
+            try:
+                return float(x)
+            except Exception:
+                return None
+
+        mdf["lat_clean"] = mdf["latitude"].apply(safe_float)
+        mdf["lon_clean"] = mdf["longitude"].apply(safe_float)
+        mdf = mdf.dropna(subset=["lat_clean", "lon_clean"])
+
+        if mdf.empty:
+            st.info("No valid coordinates to show.")
+            st.stop()
+
+        avg_lat = mdf["lat_clean"].mean()
+        avg_lon = mdf["lon_clean"].mean()
+
+        m = folium.Map(
+            location=[avg_lat, avg_lon],
+            zoom_start=11,
+            tiles="CartoDB dark_matter",
+            control_scale=True,
+        )
+
+        bounds = []
+
+        for _, row in mdf.iterrows():
+            img_url = row.get("image_url", "")
+            if img_url and isinstance(img_url, str) and img_url.startswith("http"):
+                thumb_html = f"""
+                    <img src="{img_url}"
+                         style="width:100%; height:150px; object-fit:cover;
+                                border-radius:10px; margin-bottom:10px;" />
+                """
+            else:
+                thumb_html = """
+                    <div style="width:100%; height:150px; background:#333;
+                                border-radius:10px; margin-bottom:10px;
+                                display:flex; justify-content:center; align-items:center;
+                                color:#bbb; font-size:0.9rem;">
+                        No image
+                    </div>
+                """
+
+            popup_html = f"""
+            <div style="
+                font-size:14px;
+                line-height:1.6;
+                background:#1e1e1e;
+                color:#f2f2f2;
+                padding:16px;
+                border-radius:12px;
+                width:240px;
+                overflow:hidden;
+            ">
+
+                {thumb_html}
+
+                <div style="font-size:16px; font-weight:700; color:#ffffff;">
+                    {row.get('product_name', '')}
+                </div>
+
+                <div style="color:#bbbbbb; margin-bottom:8px;">
+                    {row.get('brand_id', '')}
+                </div>
+
+                <div style="margin-bottom:6px; color:#e0e0e0;">
+                    <b>{row.get('store_name','')}</b><br>
+                    {row.get('address','')}, {row.get('city','')}
+                </div>
+
+                <div style="color:#cccccc; margin-bottom:8px;">
+                    <b>{row.get('start_fmt','')}</b> – <b>{row.get('end_fmt','')}</b>
+                </div>
+
+                <div style="color:#dddddd;">
+                    {row.get('description','')}
+                </div>
+
+            </div>
+            """
+
+            popup = folium.Popup(
+                folium.IFrame(popup_html, width=260, height=350),
+                max_width=260,
+            )
+
+            folium.CircleMarker(
+                location=[row["lat_clean"], row["lon_clean"]],
+                radius=10,
+                color="#9C27B0",
+                fill=True,
+                fill_color="#9C27B0",
+                fill_opacity=0.85,
+                popup=popup,
+            ).add_to(m)
+
+            bounds.append([row["lat_clean"], row["lon_clean"]])
+
+        if len(bounds) > 0:
+            m.fit_bounds(bounds, padding=(20, 20))
+
+        st_folium(m, width="100%", height=520)
+
+
+# -------------------------------------------------
+# GEOCODING (Address + City)
 # -------------------------------------------------
 def geocode_address(address, city):
-    """Return (lat, lon) or None if not found."""
+    """Return (lat, lon) from Nominatim or None."""
     try:
         query = f"{address}, {city}, Finland"
         url = "https://nominatim.openstreetmap.org/search"
+
         params = {
             "q": query,
             "format": "json",
@@ -387,18 +675,23 @@ def geocode_address(address, city):
             "addressdetails": 1,
             "countrycodes": "fi",
         }
+
         response = requests.get(
-            url, params=params, headers={"User-Agent": "MaistiaisetMap/1.0"}
+            url,
+            params=params,
+            headers={"User-Agent": "MaistiaisetMap/1.0"},
+            timeout=10,
         )
         data = response.json()
-        if len(data) == 0:
+        if not data:
             return None
+
         return float(data[0]["lat"]), float(data[0]["lon"])
+
     except Exception:
         return None
-
 # -------------------------------------------------
-# FORM TAB
+# FORM TAB (Event Submission) — FIXED & CLEAN
 # -------------------------------------------------
 if st.session_state["active_tab"] == "form":
     st.subheader(T["form_tab"])
@@ -408,68 +701,72 @@ if st.session_state["active_tab"] == "form":
 
     with st.form("event_form", clear_on_submit=True):
 
-        # ---------------------------
         # BASIC FIELDS
-        # ---------------------------
         product_name = st.text_input(T["product_name"])
-        brand_id = st.text_input(T["brand_id"])
-        store_name = st.text_input(T["store_name"])
-        address = st.text_input(T["address"])
-        city = st.text_input(T["city"])
-        description = st.text_area("Description")
+        brand_id     = st.text_input(T["brand_id"])
+        store_name   = st.text_input(T["store_name"])
+        address      = st.text_input(T["address"])
+        city         = st.text_input(T["city"])
+        description  = st.text_area("Description")
 
         st.markdown("<div style='margin-bottom:6px;'></div>", unsafe_allow_html=True)
 
-        # IMAGE UPLOAD
-        # collect an optional image file; upload will occur after the Firestore doc is created
+        # IMAGE UPLOAD (optional)
         image_file = st.file_uploader("Image (optional)", type=["jpg", "jpeg", "png"])
 
-        # ---------------------------
         # TIME INPUTS
-        # ---------------------------
         manual_times = st.checkbox(T["manual_times_label"], value=False)
 
         colA, colB = st.columns(2)
+
         with colA:
             start_date = st.date_input(T["start_date"])
             start_time_val = (
                 st.text_input(T["start_time"])
-                if manual_times
-                else st.time_input(T["start_time"], value=time(12, 0))
+                if manual_times else st.time_input(T["start_time"], value=time(12,0))
             )
 
         with colB:
             end_date = st.date_input(T["end_date"])
             end_time_val = (
                 st.text_input(T["end_time"])
-                if manual_times
-                else st.time_input(T["end_time"], value=time(13, 0))
+                if manual_times else st.time_input(T["end_time"], value=time(13,0))
             )
 
         st.markdown("<div style='margin-bottom:10px;'></div>", unsafe_allow_html=True)
 
         submitted = st.form_submit_button(T["create_event"])
 
+        # -------------------------------------------------
+        # ON SUBMIT
+        # -------------------------------------------------
         if submitted:
-            # TIME STRINGS
-            start_str = (
-                start_time_val if manual_times else start_time_val.strftime("%H:%M")
-            )
-            end_str = (
-                end_time_val if manual_times else end_time_val.strftime("%H:%M")
-            )
 
-            # GEOCODE
+            # Convert times to strings
+            start_str = start_time_val if manual_times else start_time_val.strftime("%H:%M")
+            end_str   = end_time_val if manual_times else end_time_val.strftime("%H:%M")
+
+            # --- DATE VALIDATION (fix disappearing events) ---
+            start_dt = pd.to_datetime(f"{start_date} {start_str}", errors="coerce")
+            end_dt   = pd.to_datetime(f"{end_date} {end_str}", errors="coerce")
+
+            if start_dt is None or end_dt is None or pd.isna(start_dt) or pd.isna(end_dt):
+                st.error("Invalid date or time format.")
+                st.stop()
+
+            if end_dt < start_dt:
+                st.error("End time cannot be earlier than the start time.")
+                st.stop()
+
+            # GEOCODE ADDRESS → lat/lon
             coords = geocode_address(address, city)
             if not coords:
-                st.error(
-                    "Could not find this address. Please check spelling or add city name."
-                )
+                st.error("Could not find this address. Please check spelling or add city name.")
                 st.stop()
 
             lat, lon = coords
 
-            # BASE DOC
+            # FIRESTORE DOCUMENT BASE
             base_doc = {
                 "product_name": product_name,
                 "brand_id": brand_id,
@@ -479,26 +776,26 @@ if st.session_state["active_tab"] == "form":
                 "latitude": lat,
                 "longitude": lon,
                 "description": description,
-                "start_time": f"{start_date} {start_str}",
-                "end_time": f"{end_date} {end_str}",
+                "start_time": start_dt.strftime("%Y-%m-%d %H:%M"),
+                "end_time": end_dt.strftime("%Y-%m-%d %H:%M"),
                 "approved": False,
             }
 
-            # Create Firestore doc
+            # Create Firestore document
             doc_ref = db.collection("events").document()
             doc_ref.set(base_doc)
             doc_id = doc_ref.id
 
-            # IMAGE UPLOAD (fixed for uniform bucket-level access)
+            # -------------------------------------------------
+            # IMAGE UPLOAD (FINAL — works with uniform bucket access)
+            # -------------------------------------------------
             if image_file:
                 try:
                     blob = bucket.blob(f"events/{doc_id}/image.jpg")
                     blob.upload_from_file(image_file, content_type=image_file.type)
 
-                    # Public URL format that works with uniform access
-                    image_url = (
-                        f"https://storage.googleapis.com/{bucket.name}/events/{doc_id}/image.jpg"
-                    )
+                    # Signed URL (no ACL needed)
+                    image_url = f"https://storage.googleapis.com/{bucket.name}/events/{doc_id}/image.jpg"
 
                     doc_ref.update({"image_url": image_url})
 
@@ -508,26 +805,35 @@ if st.session_state["active_tab"] == "form":
             st.success("Event submitted for approval!")
 
 # -------------------------------------------------
-# ADMIN TAB (includes Approve + Delete)
+# ADMIN TAB (Login, Logout, Approve, Delete)
 # -------------------------------------------------
 if st.session_state["active_tab"] == "admin":
     st.subheader(T["login_title"])
 
-    # Password field
+    # LOGIN FORM
     pwd = st.text_input(T["password"], type="password")
+    login_btn = st.button(T["login_button"])
 
-    # Login button
-    if st.button(T["login_button"]):
+    if login_btn:
         if pwd == st.secrets["admin"]["password"]:
             st.session_state["admin_logged_in"] = True
+            st.success("Logged in!")
+            st.rerun()
         else:
             st.error(T["wrong_password"])
 
-    # If logged in, show pending + approved events
+    # If logged in, show admin panel
     if st.session_state.get("admin_logged_in"):
+
+        # LOGOUT BUTTON
+        st.write("---")
+        if st.button("Logout"):
+            st.session_state["admin_logged_in"] = False
+            st.success("Logged out.")
+            st.rerun()
+
         st.header(T["admin_panel"])
 
-        # Show ALL events (pending + approved)
         all_events = events_df if not events_df.empty else pd.DataFrame()
 
         if all_events.empty:
@@ -535,9 +841,16 @@ if st.session_state["active_tab"] == "admin":
         else:
             for index, row in all_events.iterrows():
                 st.write("---")
-                st.write(f"**{row['product_name']} – {row.get('brand_id','')}**")
-                st.write(row["store_name"], "•", row["address"], "•", row.get("city", ""))
-                st.write(f"{row['start_time']} – {row['end_time']}")
+
+                st.write(f"**{row.get('product_name','')} – {row.get('brand_id','')}**")
+                st.write(
+                    row.get("store_name", ""),
+                    "•",
+                    row.get("address", ""),
+                    "•",
+                    row.get("city", ""),
+                )
+                st.write(f"{row.get('start_time','')} – {row.get('end_time','')}")
                 st.write(row.get("description", ""))
 
                 colA, colB = st.columns([1, 1])
@@ -546,30 +859,22 @@ if st.session_state["active_tab"] == "admin":
                 with colA:
                     if not row.get("approved", False):
                         if st.button(T["approve_button"], key=f"approve_{index}"):
-                            matches = (
-                                db.collection("events")
-                                .where("product_name", "==", row["product_name"])
-                                .stream()
+
+                            # Approve THIS exact document using its Firestore ID
+                            db.collection("events").document(row["id"]).update(
+                                {"approved": True}
                             )
-                            for ev in matches:
-                                db.collection("events").document(ev.id).update(
-                                    {"approved": True}
-                                )
+
                             st.success(T["approved_msg"])
                             st.rerun()
                     else:
-                        st.success("Approved")
+                        st.success(T["approved"])
 
                 # DELETE BUTTON
                 with colB:
                     if st.button("Delete", key=f"delete_{index}"):
-                        matches = (
-                            db.collection("events")
-                            .where("product_name", "==", row["product_name"])
-                            .stream()
-                        )
-                        for ev in matches:
-                            db.collection("events").document(ev.id).delete()
+
+                        db.collection("events").document(row["id"]).delete()
 
                         st.warning("Event deleted.")
                         st.rerun()
