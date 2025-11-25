@@ -4,5 +4,4 @@ firebase-admin
 requests
 folium
 streamlit-folium
-python-dateutil
 geopy
