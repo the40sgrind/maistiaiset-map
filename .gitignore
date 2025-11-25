@@ -1,3 +1,21 @@
-backend/firebase_key.json
+# macOS junk
+.DS_Store
+
+# VS Code workspace junk
+.vscode/
+*.code-workspace
+
+# Python venvs
+venv/
 backend/venv/
+
+# Streamlit cache
+.streamlit/
+
+# General Python ignores
 __pycache__/
+*.pyc
+
+# Firebase key (never upload)
+backend/firebase_key.json
+
