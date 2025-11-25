@@ -13,7 +13,7 @@ from streamlit_folium import st_folium
 st.set_page_config(page_title="Maistiaiset Map", layout="wide")
 
 # -------------------------------------------------
-# MOBILE OPTIMIZATION (CSS + JS)
+# GLOBAL CSS (Mobile Optimization + Popup Fix)
 # -------------------------------------------------
 st.markdown("""
 <style>
@@ -59,9 +59,22 @@ st.markdown("""
         }
     }
 
+    /* Popup width fix for Folium */
+    .leaflet-popup-content {
+        max-width: 260px !important;
+        overflow-wrap: break-word !important;
+    }
+
+    /* Ensure popup images scale nicely */
+    .leaflet-popup-content img {
+        max-width: 100% !important;
+        height: auto !important;
+        border-radius: 6px;
+        margin-bottom: 6px;
+    }
+
 </style>
 """, unsafe_allow_html=True)
-
 
 # -------------------------------------------------
 # JS: Detect mobile & store in session_state
@@ -531,132 +544,133 @@ if st.session_state["active_tab"] == "list":
         for _, row in filtered_df.iterrows():
             render_event_card(row)
 # -------------------------------------------------
-# MAP TAB (Folium – Dark Map + Violet Markers + Thumbnails)
+# MAP TAB (Folium – Safe Upgrade, Same Design)
 # -------------------------------------------------
 if st.session_state["active_tab"] == "map":
 
     if filtered_df.empty:
         st.info(T["no_events_map"])
+        st.stop()
 
-    else:
-        # Recompute formats from start_time / end_time to be safe
-        def format_dt_for_map(v):
-            try:
-                dt = to_datetime(v)
-                if dt:
-                    return dt.strftime("%d-%m-%Y %H:%M")
-                return ""
-            except Exception:
-                return ""
+    # Recompute formats for map display
+    def format_dt_for_map(v):
+        try:
+            dt = to_datetime(v)
+            return dt.strftime("%d-%m-%Y %H:%M") if dt else ""
+        except Exception:
+            return ""
 
-        mdf = filtered_df.copy()
-        mdf["start_fmt"] = mdf["start_time"].apply(format_dt_for_map)
-        mdf["end_fmt"] = mdf["end_time"].apply(format_dt_for_map)
+    mdf = filtered_df.copy()
+    mdf["start_fmt"] = mdf["start_time"].apply(format_dt_for_map)
+    mdf["end_fmt"] = mdf["end_time"].apply(format_dt_for_map)
 
-        # Safe float conversion for lat/lon
-        def safe_float(x):
-            try:
-                return float(x)
-            except Exception:
-                return None
+    # Safe float conversion for coordinates
+    def safe_float(x):
+        try:
+            return float(x)
+        except:
+            return None
 
-        mdf["lat_clean"] = mdf["latitude"].apply(safe_float)
-        mdf["lon_clean"] = mdf["longitude"].apply(safe_float)
-        mdf = mdf.dropna(subset=["lat_clean", "lon_clean"])
+    mdf["lat_clean"] = mdf["latitude"].apply(safe_float)
+    mdf["lon_clean"] = mdf["longitude"].apply(safe_float)
+    mdf = mdf.dropna(subset=["lat_clean", "lon_clean"])
 
-        if mdf.empty:
-            st.info("No valid coordinates to show.")
-            st.stop()
+    if mdf.empty:
+        st.info("No valid coordinates to show.")
+        st.stop()
 
-        avg_lat = mdf["lat_clean"].mean()
-        avg_lon = mdf["lon_clean"].mean()
+    # Auto-center based on valid coordinates
+    avg_lat = mdf["lat_clean"].mean()
+    avg_lon = mdf["lon_clean"].mean()
 
-        m = folium.Map(
-            location=[avg_lat, avg_lon],
-            zoom_start=11,
-            tiles="CartoDB dark_matter",
-            control_scale=True,
-        )
+    m = folium.Map(
+        location=[avg_lat, avg_lon],
+        zoom_start=11,
+        tiles="CartoDB dark_matter",
+        control_scale=True,
+    )
 
-        bounds = []
+    bounds = []
 
-        for _, row in mdf.iterrows():
-            img_url = row.get("image_url", "")
-            if img_url and isinstance(img_url, str) and img_url.startswith("http"):
-                thumb_html = f"""
-                    <img src="{img_url}"
-                         style="width:100%; height:150px; object-fit:cover;
-                                border-radius:10px; margin-bottom:10px;" />
-                """
-            else:
-                thumb_html = """
-                    <div style="width:100%; height:150px; background:#333;
-                                border-radius:10px; margin-bottom:10px;
-                                display:flex; justify-content:center; align-items:center;
-                                color:#bbb; font-size:0.9rem;">
-                        No image
-                    </div>
-                """
+    # Add violet markers + your popup card
+    for _, row in mdf.iterrows():
 
-            popup_html = f"""
-            <div style="
-                font-size:14px;
-                line-height:1.6;
-                background:#1e1e1e;
-                color:#f2f2f2;
-                padding:16px;
-                border-radius:12px;
-                width:240px;
-                overflow:hidden;
-            ">
-
-                {thumb_html}
-
-                <div style="font-size:16px; font-weight:700; color:#ffffff;">
-                    {row.get('product_name', '')}
+        img_url = row.get("image_url", "")
+        if img_url and isinstance(img_url, str) and img_url.startswith("http"):
+            thumb_html = f"""
+                <img src="{img_url}"
+                     style="width:100%; height:150px; object-fit:cover;
+                            border-radius:10px; margin-bottom:10px;" />
+            """
+        else:
+            thumb_html = """
+                <div style="width:100%; height:150px; background:#333;
+                            border-radius:10px; margin-bottom:10px;
+                            display:flex; justify-content:center; align-items:center;
+                            color:#bbb; font-size:0.9rem;">
+                    No image
                 </div>
-
-                <div style="color:#bbbbbb; margin-bottom:8px;">
-                    {row.get('brand_id', '')}
-                </div>
-
-                <div style="margin-bottom:6px; color:#e0e0e0;">
-                    <b>{row.get('store_name','')}</b><br>
-                    {row.get('address','')}, {row.get('city','')}
-                </div>
-
-                <div style="color:#cccccc; margin-bottom:8px;">
-                    <b>{row.get('start_fmt','')}</b> – <b>{row.get('end_fmt','')}</b>
-                </div>
-
-                <div style="color:#dddddd;">
-                    {row.get('description','')}
-                </div>
-
-            </div>
             """
 
-            popup = folium.Popup(
-                folium.IFrame(popup_html, width=260, height=350),
-                max_width=260,
-            )
+        popup_html = f"""
+        <div style="
+            font-size:14px;
+            line-height:1.6;
+            background:#1e1e1e;
+            color:#f2f2f2;
+            padding:16px;
+            border-radius:12px;
+            width:240px;
+            overflow:hidden;
+        ">
+            {thumb_html}
 
-            folium.CircleMarker(
-                location=[row["lat_clean"], row["lon_clean"]],
-                radius=10,
-                color="#9C27B0",
-                fill=True,
-                fill_color="#9C27B0",
-                fill_opacity=0.85,
-                popup=popup,
-            ).add_to(m)
+            <div style="font-size:16px; font-weight:700; color:#ffffff;">
+                {row.get('product_name', '')}
+            </div>
 
-            bounds.append([row["lat_clean"], row["lon_clean"]])
+            <div style="color:#bbbbbb; margin-bottom:8px;">
+                {row.get('brand_id', '')}
+            </div>
 
-        if len(bounds) > 0:
-            m.fit_bounds(bounds, padding=(20, 20))
+            <div style="margin-bottom:6px; color:#e0e0e0;">
+                <b>{row.get('store_name','')}</b><br>
+                {row.get('address','')}, {row.get('city','')}
+            </div>
 
-        st_folium(m, width="100%", height=520)
+            <div style="color:#cccccc; margin-bottom:8px;">
+                <b>{row.get('start_fmt','')}</b> – <b>{row.get('end_fmt','')}</b>
+            </div>
+
+            <div style="color:#dddddd;">
+                {row.get('description','')}
+            </div>
+        </div>
+        """
+
+        popup = folium.Popup(
+            folium.IFrame(popup_html, width=260, height=350),
+            max_width=260,
+        )
+
+        # Violet marker with slightly larger radius for mobile usability
+        folium.CircleMarker(
+            location=[row["lat_clean"], row["lon_clean"]],
+            radius=10,
+            color="#9C27B0",
+            fill=True,
+            fill_color="#9C27B0",
+            fill_opacity=0.85,
+            popup=popup,
+        ).add_to(m)
+
+        bounds.append([row["lat_clean"], row["lon_clean"]])
+
+    # Auto-fit map to all markers safely
+    if bounds:
+        m.fit_bounds(bounds, padding=(20, 20))
+
+    st_folium(m, width="100%", height=520)
 
 
 # -------------------------------------------------
@@ -691,7 +705,7 @@ def geocode_address(address, city):
     except Exception:
         return None
 # -------------------------------------------------
-# FORM TAB (Event Submission) — FIXED & CLEAN
+# FORM TAB (Event Submission) — PERSISTENT FIELDS
 # -------------------------------------------------
 if st.session_state["active_tab"] == "form":
     st.subheader(T["form_tab"])
@@ -699,57 +713,99 @@ if st.session_state["active_tab"] == "form":
 
     bucket = storage.bucket()
 
-    with st.form("event_form", clear_on_submit=True):
+    # Initialize session_state defaults
+    defaults = {
+        "product_name": "",
+        "brand_id": "",
+        "store_name": "",
+        "address": "",
+        "city": "",
+        "description": "",
+        "image_file": None,
+        "start_date": datetime.today().date(),
+        "end_date": datetime.today().date(),
+        "start_time_val": time(12, 0),
+        "end_time_val": time(13, 0),
+        "manual_times": False,
+    }
+    for k, v in defaults.items():
+        st.session_state.setdefault(k, v)
+
+    # -------------------------------
+    # FORM UI
+    # -------------------------------
+    with st.form("event_form", clear_on_submit=False):
 
         # BASIC FIELDS
-        product_name = st.text_input(T["product_name"])
-        brand_id     = st.text_input(T["brand_id"])
-        store_name   = st.text_input(T["store_name"])
-        address      = st.text_input(T["address"])
-        city         = st.text_input(T["city"])
-        description  = st.text_area("Description")
+        product_name = st.text_input(T["product_name"], value=st.session_state["product_name"])
+        st.session_state["product_name"] = product_name
+
+        brand_id = st.text_input(T["brand_id"], value=st.session_state["brand_id"])
+        st.session_state["brand_id"] = brand_id
+
+        store_name = st.text_input(T["store_name"], value=st.session_state["store_name"])
+        st.session_state["store_name"] = store_name
+
+        address = st.text_input(T["address"], value=st.session_state["address"])
+        st.session_state["address"] = address
+
+        city = st.text_input(T["city"], value=st.session_state["city"])
+        st.session_state["city"] = city
+
+        description = st.text_area("Description", value=st.session_state["description"])
+        st.session_state["description"] = description
+
+        # IMAGE UPLOAD (persistent)
+        image_file = st.file_uploader("Event image (optional)", type=["jpg", "jpeg", "png"])
+        if image_file is not None:
+            st.session_state["image_file"] = image_file
+        image_file = st.session_state["image_file"]
 
         st.markdown("<div style='margin-bottom:6px;'></div>", unsafe_allow_html=True)
 
-        # IMAGE UPLOAD (optional)
-        image_file = st.file_uploader("Image (optional)", type=["jpg", "jpeg", "png"])
-
-        # TIME INPUTS
-        manual_times = st.checkbox(T["manual_times_label"], value=False)
+        # TIME INPUTS (persistent)
+        manual_times = st.checkbox(T["manual_times_label"], value=st.session_state["manual_times"])
+        st.session_state["manual_times"] = manual_times
 
         colA, colB = st.columns(2)
-
         with colA:
-            start_date = st.date_input(T["start_date"])
+            start_date = st.date_input(T["start_date"], value=st.session_state["start_date"])
+            st.session_state["start_date"] = start_date
+
             start_time_val = (
-                st.text_input(T["start_time"])
-                if manual_times else st.time_input(T["start_time"], value=time(12,0))
+                st.text_input(T["start_time"], value=st.session_state["start_time_val"])
+                if manual_times else
+                st.time_input(T["start_time"], value=st.session_state["start_time_val"])
             )
+            st.session_state["start_time_val"] = start_time_val
 
         with colB:
-            end_date = st.date_input(T["end_date"])
+            end_date = st.date_input(T["end_date"], value=st.session_state["end_date"])
+            st.session_state["end_date"] = end_date
+
             end_time_val = (
-                st.text_input(T["end_time"])
-                if manual_times else st.time_input(T["end_time"], value=time(13,0))
+                st.text_input(T["end_time"], value=st.session_state["end_time_val"])
+                if manual_times else
+                st.time_input(T["end_time"], value=st.session_state["end_time_val"])
             )
+            st.session_state["end_time_val"] = end_time_val
 
-        st.markdown("<div style='margin-bottom:10px;'></div>", unsafe_allow_html=True)
-
+        # SUBMIT BUTTON
         submitted = st.form_submit_button(T["create_event"])
 
-        # -------------------------------------------------
-        # ON SUBMIT
-        # -------------------------------------------------
+        # ----------------------------------------
+        # FORM SUBMISSION LOGIC
+        # ----------------------------------------
         if submitted:
 
             # Convert times to strings
             start_str = start_time_val if manual_times else start_time_val.strftime("%H:%M")
             end_str   = end_time_val if manual_times else end_time_val.strftime("%H:%M")
 
-            # --- DATE VALIDATION (fix disappearing events) ---
             start_dt = pd.to_datetime(f"{start_date} {start_str}", errors="coerce")
             end_dt   = pd.to_datetime(f"{end_date} {end_str}", errors="coerce")
 
+            # VALIDATION
             if start_dt is None or end_dt is None or pd.isna(start_dt) or pd.isna(end_dt):
                 st.error("Invalid date or time format.")
                 st.stop()
@@ -758,7 +814,9 @@ if st.session_state["active_tab"] == "form":
                 st.error("End time cannot be earlier than the start time.")
                 st.stop()
 
-            # GEOCODE ADDRESS → lat/lon
+            # ----------------------------------------
+            # GEOCODING
+            # ----------------------------------------
             coords = geocode_address(address, city)
             if not coords:
                 st.error("Could not find this address. Please check spelling or add city name.")
@@ -766,7 +824,9 @@ if st.session_state["active_tab"] == "form":
 
             lat, lon = coords
 
-            # FIRESTORE DOCUMENT BASE
+            # ----------------------------------------
+            # BASE DOCUMENT
+            # ----------------------------------------
             base_doc = {
                 "product_name": product_name,
                 "brand_id": brand_id,
@@ -781,21 +841,21 @@ if st.session_state["active_tab"] == "form":
                 "approved": False,
             }
 
-            # Create Firestore document
+            # CREATE FS DOCUMENT
             doc_ref = db.collection("events").document()
             doc_ref.set(base_doc)
             doc_id = doc_ref.id
 
-            # -------------------------------------------------
-            # IMAGE UPLOAD (FINAL — works with uniform bucket access)
-            # -------------------------------------------------
+            # ----------------------------------------
+            # IMAGE UPLOAD — FIXED (NO make_public)
+            # ----------------------------------------
             if image_file:
                 try:
                     blob = bucket.blob(f"events/{doc_id}/image.jpg")
                     blob.upload_from_file(image_file, content_type=image_file.type)
 
-                    # Signed URL (no ACL needed)
-                    image_url = f"https://storage.googleapis.com/{bucket.name}/events/{doc_id}/image.jpg"
+                    # Uniform bucket-level access → no ACL allowed
+                    image_url = blob.public_url
 
                     doc_ref.update({"image_url": image_url})
 
